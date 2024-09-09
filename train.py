@@ -7,7 +7,6 @@ import torchdiffeq
 from tqdm import tqdm
 from statistics import mean
 import matplotlib.pyplot as plt 
-from modules.test_unet import BasicUNet
 
 
 def euler_solver(func, y, t, method):
@@ -69,15 +68,14 @@ IMG_SIZE=64
 EPOCHS=20
 lr = 1e-4
 device = "cuda"
-training=False
+training=True
 
 data_loader = get_data_loader("", BATCH_SIZE, IMG_SIZE)
 batch = next(iter(data_loader))
 print(batch[0].shape)
 
 #model and optimizers 
-# model = U_Net()
-model = BasicUNet()
+model = U_Net()
 optimizer = torch.optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.999)) 
 model.to(device)
 
@@ -114,7 +112,7 @@ if training:
     torch.save({
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
-    }, "weights/first.pth")
+    }, "weights/new_unet.pth")
 else: 
     #load weights
     checkpoint = torch.load("weights/first.pth")
@@ -142,11 +140,6 @@ if __name__ == "__main__":
         print(torch.min(img), torch.max(img))
 
     plt.show()
-
-#Throughts
-# - Both papers seem to use dopri5 as an ODE solver
-# - IMPORTANT: During training we dont solve the ODEs, so we never actually do anything beyond the vector field, but during sampling we must solve ODEs using the learned vector field!
-# - C = 128, [C, 2C, 3C, 4C] in the downsampling
 
 
 
