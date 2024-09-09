@@ -21,6 +21,9 @@ class SinusoidalEmbedding(nn.Module):
         """
             time_t: current time step for sample. shape of [batch_size, 1]
         """
+        if time_t.ndimension() == 0:
+            time_t = time_t.unsqueeze(0).unsqueeze(0)
+
         device = time_t.device
         embeddings = torch.zeros((time_t.shape[0], self.embedding_dim), device=device)
 
@@ -114,17 +117,21 @@ class U_Net(nn.Module):
                     upsample=True
                 )
             )
-    
-        self.final_conv_block = Conv2DBlock(
-            input_channels=self.channel_dimensions[2],
-            output_channels=self.channel_dimensions[1],
-            t_dimension=self.t_dimension,
-            upsample=False
+        self.upsample_blocks.append(
+            Conv2DBlock(
+                input_channels=self.channel_dimensions[2],
+                output_channels=self.channel_dimensions[1],
+                t_dimension=self.t_dimension,
+                upsample=False
+            )            
         )
-
+    
         self.output_conv = nn.Conv2d(in_channels=self.channel_dimensions[1], out_channels=self.channel_dimensions[0], kernel_size=1)
 
-    def forward(self, x: torch.tensor, t: torch.tensor) -> torch.tensor:
+    def forward(self, t: torch.tensor, x: torch.tensor) -> torch.tensor:
+        """
+        Has to take in time argument first because of torchdiffeq solver
+        """
         time_embedding = self.embedding_layer(t)
 
         skip_connections = []
@@ -139,9 +146,7 @@ class U_Net(nn.Module):
             x = torch.cat((x, skip_connections[-idx - 1]), dim=1)
             x = up_block(x, time_embedding)
 
-        x = torch.cat((x, skip_connections[0]), dim=1)
-        x = self.final_conv_block(x, time_embedding)
-        x = torch.relu(self.output_conv(x))
+        x = self.output_conv(x)
 
         return x
 
