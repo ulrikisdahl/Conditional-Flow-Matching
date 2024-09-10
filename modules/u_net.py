@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class SinusoidalEmbedding(nn.Module):
@@ -36,15 +37,57 @@ class SinusoidalEmbedding(nn.Module):
         #cosine encoding for odd indices
         embeddings[:, 1::2] = torch.cos(time_t / div_term[1::2])
         return embeddings
+    
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, channels, n_heads):
+        super(MultiHeadAttention, self).__init__()
+        self.n_heads = n_heads
+        self.head_dim = channels // n_heads
+        self.downsample_after=False #Hack for making compatible with UNet
+        self.upsample=False
+
+        # self.group_norm = nn.GroupNorm(num_groups=n_heads, num_channels=channels)
+        self.group_norm = nn.BatchNorm2d(channels)
+
+        self.Q_proj = nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=3, stride=1, padding=1) 
+        self.K_proj = nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=3, stride=1, padding=1)
+        self.V_proj = nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=3, stride=1, padding=1)
+        
+        self.out_proj = nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=3, stride=1, padding=1)
+
+    def forward(self, x, t):
+        B, C, Height, Width = x.shape
+
+        x = self.group_norm(x)
+
+        Q = self.Q_proj(x)
+        K = self.K_proj(x)
+        V = self.V_proj(x)
+
+        Q = Q.view(B, self.n_heads, self.head_dim, Height*Width).permute(0, 1, 3, 2) #(B, n_heads, H*W, head_dim)
+        K = K.view(B, self.n_heads, self.head_dim, Height*Width).permute(0, 1, 3, 2)
+        V = V.view(B, self.n_heads, self.head_dim, Height*Width).permute(0, 1, 3, 2)
+
+        attn_scores = torch.einsum("bnhq, bnhk -> bnhk", Q, V) 
+        attn_scores = attn_scores / (self.head_dim**0.5)
+        attn_scores = F.softmax(attn_scores, dim=-1)
+
+        attn_output = torch.einsum("bnhq, bnhv -> bnhv", attn_scores, V)
+
+        attn_output = attn_output.permute(0, 1, 3, 2).contiguous().view(B, C, Height, Width)
+        out = self.out_proj(attn_output)
+        return attn_output
 
 
 class Conv2DBlock(nn.Module):
-    def __init__(self, input_channels, output_channels, t_dimension, upsample):
+    def __init__(self, input_channels, output_channels, t_dimension, upsample, downsample_after=False):
         """
         Simple convolutional block with two conv layers (optionally 3) that embeds time
         """
         super(Conv2DBlock, self).__init__()
         self.upsample = upsample
+        self.downsample_after = downsample_after
 
         #Projects the time embedding to fit the dimensions of the input
         self.project_t = nn.Linear(in_features=t_dimension, out_features=output_channels)
@@ -65,19 +108,19 @@ class Conv2DBlock(nn.Module):
         projected_time_embedding = torch.relu(projected_time_embedding)
         projected_time_embedding = projected_time_embedding[..., None, None] #unsqueeze two final dimensions
         
-        x = torch.relu(self.bn1(self.conv1(x)))
-        
-        x = x + projected_time_embedding #embed information about the timstep
+        h = torch.relu(self.bn1(self.conv1(x)))
+        h = h + projected_time_embedding #embed information about the timstep
+        h = torch.relu(self.bn2(self.conv2(h)))
+        # h = h + x
 
-        x = torch.relu(self.bn2(self.conv2(x)))
         if self.upsample:
-            x = torch.relu(self.bn3(self.conv3(x)))
-        return x
+            h = torch.relu(self.bn3(self.conv3(h)))
+        return h
 
 
-class U_Net(nn.Module):
+class UNet(nn.Module):
     def __init__(self):
-        super(U_Net, self).__init__()
+        super(UNet, self).__init__()
         self.t_dimension = 30
         self.channel_dimensions = [3, 64, 128, 256, 512] #[C, 2*C, 3*C, 4*C]
 
@@ -88,35 +131,101 @@ class U_Net(nn.Module):
             nn.ReLU()
         )
 
+        ### Downsample ###
         self.downsample_blocks = nn.ModuleList([])
         for channel_idx in range(len(self.channel_dimensions) - 1):
-            self.downsample_blocks.append(
-                Conv2DBlock(
-                    input_channels=self.channel_dimensions[channel_idx],
-                    output_channels=self.channel_dimensions[channel_idx + 1],
-                    t_dimension=self.t_dimension,
-                    upsample=False
+            if channel_idx > 1:
+                self.downsample_blocks.append(
+                    Conv2DBlock(
+                        input_channels=self.channel_dimensions[channel_idx],
+                        output_channels=self.channel_dimensions[channel_idx + 1],
+                        t_dimension=self.t_dimension,
+                        upsample=False,
+                        downsample_after=False
+                    )
                 )
-            )
+                self.downsample_blocks.append(
+                    MultiHeadAttention(
+                        channels=self.channel_dimensions[channel_idx + 1],
+                        n_heads=4
+                    )  
+                )
+                self.downsample_blocks.append(
+                    Conv2DBlock(
+                        input_channels=self.channel_dimensions[channel_idx + 1],
+                        output_channels=self.channel_dimensions[channel_idx + 1],
+                        t_dimension=self.t_dimension,
+                        upsample=False,
+                        downsample_after=True
+                    )
+                )
+            else:
+                self.downsample_blocks.append(
+                    Conv2DBlock(
+                        input_channels=self.channel_dimensions[channel_idx],
+                        output_channels=self.channel_dimensions[channel_idx + 1],
+                        t_dimension=self.t_dimension,
+                        upsample=False,
+                        downsample_after=True
+                    )
+                )
+            
         self.maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
 
-        self.middle_conv_block = Conv2DBlock(
+        ### Middle ###
+        self.middle_conv_block1 = Conv2DBlock(
             input_channels=self.channel_dimensions[-1],
+            output_channels=self.channel_dimensions[-2] * 2 * 2,
+            t_dimension=self.t_dimension,
+            upsample=False
+        )
+        self.middle_attention_block1 = MultiHeadAttention(
+            channels=self.channel_dimensions[-2] * 2 * 2,
+            n_heads=4
+        )
+        self.middle_conv_block2 = Conv2DBlock(
+            input_channels=self.channel_dimensions[-2] * 2 * 2,
             output_channels=self.channel_dimensions[-2] * 2 * 2,
             t_dimension=self.t_dimension,
             upsample=True
         )
 
+        ### Upsample ###
         self.upsample_blocks = nn.ModuleList([])
         for channel_idx in range(len(self.channel_dimensions) - 2):
-            self.upsample_blocks.append(
-                Conv2DBlock(
-                    input_channels=self.channel_dimensions[::-1][channel_idx] * 2,
-                    output_channels=self.channel_dimensions[::-1][channel_idx],
-                    t_dimension=self.t_dimension,
-                    upsample=True
+            if channel_idx < 2:
+                self.upsample_blocks.append(
+                    Conv2DBlock(
+                        input_channels=self.channel_dimensions[::-1][channel_idx] * 2,
+                        output_channels=self.channel_dimensions[::-1][channel_idx], #we want to halve it
+                        t_dimension=self.t_dimension,
+                        upsample=False
+                    )
                 )
-            )
+                self.upsample_blocks.append(
+                    MultiHeadAttention(
+                        channels=self.channel_dimensions[::-1][channel_idx],
+                        n_heads=4
+                    )
+                )
+                self.upsample_blocks.append(
+                    Conv2DBlock(
+                        input_channels=self.channel_dimensions[::-1][channel_idx],
+                        output_channels=self.channel_dimensions[::-1][channel_idx], #we want to halve it
+                        t_dimension=self.t_dimension,
+                        upsample=True
+                    )
+                )
+            else:
+                self.upsample_blocks.append(
+                    Conv2DBlock(
+                        input_channels=self.channel_dimensions[::-1][channel_idx] * 2,
+                        output_channels=self.channel_dimensions[::-1][channel_idx], #we want to halve it
+                        t_dimension=self.t_dimension,
+                        upsample=True
+                    )
+                )
+
         self.upsample_blocks.append(
             Conv2DBlock(
                 input_channels=self.channel_dimensions[2],
@@ -137,14 +246,24 @@ class U_Net(nn.Module):
         skip_connections = []
         for down_block in self.downsample_blocks:
             x = down_block(x, time_embedding)
-            skip_connections.append(x)
-            x = self.maxpool(x)
+            if down_block.downsample_after:
+                skip_connections.append(x)
+                x = self.maxpool(x)
 
-        x = self.middle_conv_block(x, time_embedding)
-        
-        for idx, up_block in enumerate(self.upsample_blocks):
-            x = torch.cat((x, skip_connections[-idx - 1]), dim=1)
+        x = self.middle_conv_block1(x, time_embedding)
+        x = self.middle_attention_block1(x, time_embedding)
+        x = self.middle_conv_block2(x, time_embedding) 
+        upsampled = True
+
+        skip_idx = 0
+        for up_block in self.upsample_blocks:
+            if upsampled:
+                x = torch.cat((x, skip_connections[-skip_idx - 1]), dim=1)
+                upsampled = False
+                skip_idx+=1
             x = up_block(x, time_embedding)
+            if up_block.upsample:
+                upsampled = True
 
         x = self.output_conv(x)
 
@@ -152,10 +271,11 @@ class U_Net(nn.Module):
 
 
 if __name__ == "__main__":
-    model = U_Net()
-
-    batch = torch.ones((32, 3, 64, 64))
+    
+    model = UNet()
 
     t = torch.rand((32, 1))
-    forward_pass = model(batch, t)
-    print(forward_pass.shape)
+    batch = torch.ones((32, 3, 64, 64))
+
+    inference = model(t, batch)
+    print(inference.shape)
