@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class ResBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -98,18 +99,22 @@ class VQVAE(nn.Module):
         N, C, H, W = z_e.shape
         z_e = z_e.permute(0, 2, 3, 1).view(N, -1, C) #(B, H*W, C)
         dist = torch.cdist(z_e, self.codebook.weight) #distance for each vec in H*w to each code in codebook
-        lookup = torch.argmin(dist, dim=2) #find the closest code for each vec in H*W
+        lookup = torch.argmin(dist, dim=-1) #find the closest code for each vec in H*W
         z_q = self.codebook(lookup).view(N, H, W, C).permute(0, 3, 1, 2) #use code to lookup the corresponding vector in the codebook
+
         return z_q
 
     def forward(self, x: torch.tensor, enc_modality: str, dec_modality) -> tuple[torch.tensor]:
         z_e = self.encode(x, modality=enc_modality)
 
-        #vector quantization
-        z_q = z_e + (self.vector_quantization(z_e) - z_e).detach() #detach for straight through estimation of gradients in the backward pass
+        #vector quantizatio
+        z_q = self.vector_quantization(z_e) 
+        z_q_ste = z_e + (z_q - z_e).detach() #straight through estimation of gradients through VQ-pass
 
-        x_hat = self.decode(z_q, modality=dec_modality)
-        return x_hat, z_e, z_q
+        output = self.decode(z_q_ste, modality=dec_modality)
+
+        
+        return output, z_e, z_q
     
 if __name__ == "__main__":
     model = VQVAE()
