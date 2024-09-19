@@ -122,7 +122,8 @@ class UNet(nn.Module):
     def __init__(self):
         super(UNet, self).__init__()
         self.t_dimension = 30
-        self.channel_dimensions = [3, 64, 128, 256, 512] #[C, 2*C, 3*C, 4*C]
+        self.latent_dim = 5
+        self.channel_dimensions = [self.latent_dim, 64, 128, 256, 512] #[C, 2*C, 3*C, 4*C]
 
 
         self.embedding_layer = nn.Sequential(
