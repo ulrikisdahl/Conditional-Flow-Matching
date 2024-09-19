@@ -13,6 +13,12 @@ I also wrote an article explaining how Flow Matching works: https://medium.com/@
 - VQ-VAE paper: https://arxiv.org/abs/1711.00937 
 <br>
 
+### Repo
+The flow matching model can be found in [u_net](/modules/u_net.py)
+<br>
+
+<br>
+
 ### Sample results for simple Flow Matching objective
 
 Generating flows that take samples from a standard gaussian to the flower-102 distribution

@@ -15,7 +15,7 @@ class ResBlock(nn.Module):
         )
         
     def forward(self, x: torch.tensor) -> torch.tensor:
-        return self.residual_sequence(x)
+        return self.residual_sequence(x) #Not really a ResBlock
 
 class Encoder(nn.Module):
     def __init__(self, latent_dim: int, input_channels: int = 3):
